@@ -1,94 +1,126 @@
-name: Deploy Spring Boot to EC2 (Ubuntu)  # Nombre del workflow
+name: Deploy Spring Boot to EC2 (Ubuntu)
 
 on:
-  push:                                 # Workflow activa cuando se hace push.
-    branches:
-      - main                            # Solo se ejecuta si push en rama main
+  push:
+    branches: [main]
 
 jobs:
-  build-and-deploy:                     # Define trabajo llamado build-and-deploy
-    runs-on: ubuntu-latest              # El trabajo se ejecuta en Ubuntu
+  build-and-deploy:
+    runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Descargar el código fuente del repositorio
-      - name: Checkout source code       # Nombre del paso.
-        uses: actions/checkout@v4        # Versión actualizada
+      # 1️⃣ Descargar código fuente
+      - name: Checkout source code
+        uses: actions/checkout@v4
 
-      # 2️⃣ Configurar JDK 21 (Java Development Kit)
-      - name: Set up JDK 21             # Nombre del paso.
-        uses: actions/setup-java@v4      # Versión actualizada
+      # 2️⃣ Configurar JDK 21
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'        # Comillas para string
-          java-version: '21'             # Comillas para string
+          distribution: 'temurin'
+          java-version: '21'
 
-      # 3️⃣ Construir la aplicación usando Maven
-      - name: Build with Maven          # Nombre del paso.
-        run: mvn clean package -DskipTests  # Opcional: saltar tests
+      # 3️⃣ Construir aplicación
+      - name: Build with Maven
+        run: mvn clean package -DskipTests
 
-      # 4️⃣ Verificar que el archivo .war existe
-      - name: Verify .war file exists   # Nuevo paso para debugging
+      # 4️⃣ DEBUG: Mostrar información sobre la conexión (sin exponer secrets completos)
+      - name: Debug SSH connection info
         run: |
-          ls -la target/*.war
-          echo "War file should be: target/demo-0.0.1-SNAPSHOT.war"
+          echo "EC2_HOST length: ${#EC2_HOST}"
+          echo "EC2_USERNAME length: ${#EC2_USERNAME}"
+          echo "EC2_PRIVATE_KEY first 50 chars: ${EC2_PRIVATE_KEY:0:50}"
+          echo "Testing SSH connectivity..."
+          echo "Host: ${{ secrets.EC2_HOST }}"
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          EC2_PRIVATE_KEY: ${{ secrets.EC2_PRIVATE_KEY }}
 
-      # 5️⃣ Copiar el archivo .war a la instancia EC2
-      - name: Copy .war to EC2          # Nombre del paso.
-        uses: appleboy/scp-action@v0.1.7  # Versión actualizada
-        with:
-          host: ${{ secrets.EC2_HOST }}    # Dirección IP de la instancia EC2 
-          username: ${{ secrets.EC2_USERNAME }}  # Nombre usuario EC2
-          key: ${{ secrets.EC2_PRIVATE_KEY }}    # Clave privada SSH 
-          port: 22                          # Puerto SSH explícito
-          source: "target/*.war"            # Patrón para capturar cualquier .war
-          target: /home/ubuntu/             # Carpeta destino en EC2
-          rm: true                          # Eliminar archivos existentes
+      # 5️⃣ Verificar archivo .war
+      - name: Verify .war file
+        run: |
+          echo "Files in target directory:"
+          ls -la target/
+          echo "War files:"
+          find target -name "*.war" -type f
 
-      # 6️⃣ Desplegar en Tomcat y configurar
-      - name: Deploy to Tomcat and configure  
-        uses: appleboy/ssh-action@v1.0.3    # Versión específica
+      # 6️⃣ Configurar SSH y probar conexión primero
+      - name: Setup SSH and test connection
+        run: |
+          # Crear directorio .ssh
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          
+          # Guardar la clave privada
+          echo "${{ secrets.EC2_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          
+          # Configurar known_hosts (evitar prompt)
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          
+          # Probar conexión SSH
+          echo "Testing SSH connection..."
+          ssh -o BatchMode=yes -o ConnectTimeout=5 \
+              -i ~/.ssh/id_rsa \
+              ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} \
+              "echo 'SSH connection successful!'" || echo "SSH test failed"
+        shell: bash
+
+      # 7️⃣ Copiar archivo usando SCP con configuración mejorada
+      - name: Copy .war to EC2
+        uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.EC2_HOST }}         # Dirección IP de EC2
-          username: ${{ secrets.EC2_USERNAME }} # Nombre de usuario de EC2
-          key: ${{ secrets.EC2_PRIVATE_KEY }}   # Clave privada SSH 
-          port: 22                               # Puerto SSH explícit
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_PRIVATE_KEY }}
+          port: 22
+          source: "target/*.war"
+          target: /tmp/
+          overwrite: true
+          strip_components: false
+          debug: true  # Modo debug activado
+
+      # 8️⃣ Desplegar en Tomcat
+      - name: Deploy to Tomcat
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_PRIVATE_KEY }}
+          port: 22
           script: |
-            # Encontrar el archivo .war recién copiado
-            WAR_FILE=$(find /home/ubuntu -name "*.war" -type f | head -1)
+            # Encontrar el archivo .war
+            echo "Looking for .war files in /tmp/"
+            ls -la /tmp/*.war 2>/dev/null || echo "No .war files found in /tmp"
+            
+            WAR_FILE=$(find /tmp -name "*.war" -type f | head -1)
             
             if [ -z "$WAR_FILE" ]; then
-              echo "Error: No .war file found in /home/ubuntu/"
+              echo "Error: No .war file found!"
               exit 1
             fi
             
-            echo "Found WAR file: $WAR_FILE"
+            echo "Deploying: $WAR_FILE"
             
-            # Detener Tomcat antes de mover el archivo
+            # Detener Tomcat
             sudo systemctl stop tomcat10
             
-            # Eliminar despliegue anterior si existe
+            # Limpiar despliegue anterior
             sudo rm -f /var/lib/tomcat10/webapps/demo.war
             sudo rm -rf /var/lib/tomcat10/webapps/demo
             
-            # Mover el archivo .war a la carpeta de despliegue de Tomcat.
-            sudo mv "$WAR_FILE" /var/lib/tomcat10/webapps/demo.war
-            
-            # Cambiar el propietario del archivo a "tomcat"
+            # Copiar nuevo archivo
+            sudo cp "$WAR_FILE" /var/lib/tomcat10/webapps/demo.war
             sudo chown tomcat:tomcat /var/lib/tomcat10/webapps/demo.war
-            
-            # Cambiar los permisos del archivo
             sudo chmod 755 /var/lib/tomcat10/webapps/demo.war
             
-            # Limpiar directorio temporal
-            rm -f /home/ubuntu/*.war
+            # Limpiar temporal
+            rm -f "$WAR_FILE"
             
-            # Reiniciar el servicio Tomcat
+            # Iniciar Tomcat
             sudo systemctl start tomcat10
             
-            # Verificar que Tomcat está funcionando
-            sleep 10
+            # Esperar y verificar
+            sleep 5
             sudo systemctl status tomcat10 --no-pager
-            
-            # Verificar el despliegue
-            echo "Deployment completed. Checking app..."
-            curl -I http://localhost:8080/demo/ || echo "Curl check completed"
-
