@@ -50,7 +50,7 @@ jobs:
           host: ${{ secrets.EC2_HOST }}         # Dirección IP de EC2
           username: ${{ secrets.EC2_USERNAME }} # Nombre de usuario de EC2
           key: ${{ secrets.EC2_PRIVATE_KEY }}   # Clave privada SSH 
-          port: 22                               # Puerto SSH explícito
+          port: 22                               # Puerto SSH explícit
           script: |
             # Encontrar el archivo .war recién copiado
             WAR_FILE=$(find /home/ubuntu -name "*.war" -type f | head -1)
