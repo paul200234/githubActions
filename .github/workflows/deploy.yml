@@ -1,126 +1,67 @@
-name: Deploy Spring Boot to EC2 (Ubuntu)
+name: Deploy Spring Boot to EC2 (Ubuntu)  # Nombre del workflow
 
 on:
-  push:
-    branches: [main]
+  push:                                   # Workflow se activa cuando se hace push.
+    branches:
+      - main                              # Solo se ejecuta si el push es en la rama main.
 
 jobs:
-  build-and-deploy:
-    runs-on: ubuntu-latest
+  build-and-deploy:                       # Define el trabajo llamado build-and-deploy.
+    runs-on: ubuntu-latest                # El trabajo se ejecuta en Ubuntu.
+    env: 
+      DB_ENDPOINT: ${{ secrets.DB_ENDPOINT }} 
+      DB_USERNAME: ${{ secrets.DB_USERNAME }} 
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
 
     steps:
-      # 1️⃣ Descargar código fuente
-      - name: Checkout source code
-        uses: actions/checkout@v4
+      # 1️⃣ Descargar el código fuente del repositorio.
+      - name: Checkout source code       
+        uses: actions/checkout@v2        
 
-      # 2️⃣ Configurar JDK 21
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
+      # 2️⃣ Configurar JDK 21 (Java Development Kit).
+      - name: Set up JDK 21             
+        uses: actions/setup-java@v2     
         with:
-          distribution: 'temurin'
-          java-version: '21'
+          java-version: 21              
+          distribution: temurin         
 
-      # 3️⃣ Construir aplicación
-      - name: Build with Maven
-        run: mvn clean package -DskipTests
+      # 3️⃣ Construir la aplicación usando Maven.
+      - name: Build with Maven          
+        run: mvn clean package          
 
-      # 4️⃣ DEBUG: Mostrar información sobre la conexión (sin exponer secrets completos)
-      - name: Debug SSH connection info
-        run: |
-          echo "EC2_HOST length: ${#EC2_HOST}"
-          echo "EC2_USERNAME length: ${#EC2_USERNAME}"
-          echo "EC2_PRIVATE_KEY first 50 chars: ${EC2_PRIVATE_KEY:0:50}"
-          echo "Testing SSH connectivity..."
-          echo "Host: ${{ secrets.EC2_HOST }}"
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
-          EC2_PRIVATE_KEY: ${{ secrets.EC2_PRIVATE_KEY }}
-
-      # 5️⃣ Verificar archivo .war
-      - name: Verify .war file
-        run: |
-          echo "Files in target directory:"
-          ls -la target/
-          echo "War files:"
-          find target -name "*.war" -type f
-
-      # 6️⃣ Configurar SSH y probar conexión primero
-      - name: Setup SSH and test connection
-        run: |
-          # Crear directorio .ssh
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          
-          # Guardar la clave privada
-          echo "${{ secrets.EC2_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          
-          # Configurar known_hosts (evitar prompt)
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
-          
-          # Probar conexión SSH
-          echo "Testing SSH connection..."
-          ssh -o BatchMode=yes -o ConnectTimeout=5 \
-              -i ~/.ssh/id_rsa \
-              ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} \
-              "echo 'SSH connection successful!'" || echo "SSH test failed"
-        shell: bash
-
-      # 7️⃣ Copiar archivo usando SCP con configuración mejorada
-      - name: Copy .war to EC2
-        uses: appleboy/scp-action@v0.1.7
+      # 4️⃣ Copiar el archivo .war a la instancia EC2.
+      - name: Copy .war to EC2          
+        uses: appleboy/scp-action@v0.1.5  
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_PRIVATE_KEY }}
-          port: 22
-          source: "target/*.war"
-          target: /tmp/
-          overwrite: true
-          strip_components: false
-          debug: true  # Modo debug activado
+          host: ${{ secrets.EC2_HOST }}     
+          username: ${{ secrets.EC2_USERNAME }} 
+          key: ${{ secrets.EC2_PRIVATE_KEY }}  
+          source: target/demo-0.0.1-SNAPSHOT.war  
+          target: /home/ubuntu/                 
+          strip_components: 1                   
 
-      # 8️⃣ Desplegar en Tomcat
-      - name: Deploy to Tomcat
-        uses: appleboy/ssh-action@v1.0.3
+      # 5️⃣ Configurar variables de entorno y desplegar la aplicación en Tomcat.
+      - name: Configure environment variables and deploy  
+        uses: appleboy/ssh-action@master        
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_PRIVATE_KEY }}
-          port: 22
+          host: ${{ secrets.EC2_HOST }}         
+          username: ${{ secrets.EC2_USERNAME }} 
+          key: ${{ secrets.EC2_PRIVATE_KEY }}   
           script: |
-            # Encontrar el archivo .war
-            echo "Looking for .war files in /tmp/"
-            ls -la /tmp/*.war 2>/dev/null || echo "No .war files found in /tmp"
+            # 1️⃣ Configurar variables de entorno en el archivo /etc/environment para persistencia.
+            echo "export DB_ENDPOINT=${{ secrets.DB_ENDPOINT }}" | sudo tee -a /etc/environment
+            echo "export DB_USERNAME=${{ secrets.DB_USERNAME }}" | sudo tee -a /etc/environment
+            echo "export DB_PASSWORD=${{ secrets.DB_PASSWORD }}" | sudo tee -a /etc/environment
             
-            WAR_FILE=$(find /tmp -name "*.war" -type f | head -1)
-            
-            if [ -z "$WAR_FILE" ]; then
-              echo "Error: No .war file found!"
-              exit 1
-            fi
-            
-            echo "Deploying: $WAR_FILE"
-            
-            # Detener Tomcat
-            sudo systemctl stop tomcat10
-            
-            # Limpiar despliegue anterior
-            sudo rm -f /var/lib/tomcat10/webapps/demo.war
-            sudo rm -rf /var/lib/tomcat10/webapps/demo
-            
-            # Copiar nuevo archivo
-            sudo cp "$WAR_FILE" /var/lib/tomcat10/webapps/demo.war
-            sudo chown tomcat:tomcat /var/lib/tomcat10/webapps/demo.war
-            sudo chmod 755 /var/lib/tomcat10/webapps/demo.war
-            
-            # Limpiar temporal
-            rm -f "$WAR_FILE"
-            
-            # Iniciar Tomcat
-            sudo systemctl start tomcat10
-            
-            # Esperar y verificar
-            sleep 5
-            sudo systemctl status tomcat10 --no-pager
+            # 2️⃣ Recargar las variables de entorno en la sesión actual.
+            source /etc/environment
+
+            # 3️⃣ Mover el archivo .war a la carpeta de despliegue de Tomcat.
+            sudo mv /home/ubuntu/demo-0.0.1-SNAPSHOT.war /var/lib/tomcat10/webapps/demo.war  
+
+            # 4️⃣ Cambiar el propietario y permisos del archivo para que Tomcat pueda acceder.
+            sudo chown tomcat:tomcat /var/lib/tomcat10/webapps/demo.war  
+            sudo chmod 755 /var/lib/tomcat10/webapps/demo.war 
+
+            # 5️⃣ Reiniciar el servicio Tomcat para cargar el nuevo archivo .war.
+            sudo systemctl restart tomcat10
